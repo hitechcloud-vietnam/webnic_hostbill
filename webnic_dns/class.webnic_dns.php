@@ -8,6 +8,16 @@ class webnic_dns extends DNSModule
     protected $modname = 'WebNIC DNS';
     protected $description = 'Clean-room WebNIC DNS module for HostBill';
     protected $_repository = 'hosting_webnic_dns';
+    protected $options = [
+        'maxdomain' => ['name' => 'maxdomain', 'value' => false, 'type' => 'input'],
+        'ns1' => ['name' => 'ns1', 'value' => false, 'type' => 'input'],
+        'ns2' => ['name' => 'ns2', 'value' => false, 'type' => 'input'],
+        'ns3' => ['name' => 'ns3', 'value' => false, 'type' => 'input'],
+        'ns4' => ['name' => 'ns4', 'value' => false, 'type' => 'input'],
+        'dns_template' => ['name' => 'dns_template', 'value' => false, 'type' => 'input'],
+        'hide_billing' => ['name' => 'hide_billing', 'value' => false, 'type' => 'check', 'default' => false],
+        'hide_zone_management' => ['name' => 'hide_zone_management', 'value' => false, 'type' => 'check', 'default' => false],
+    ];
 
     protected $serverFields = [
         self::CONNECTION_FIELD_HOSTNAME => false,
@@ -178,6 +188,20 @@ class webnic_dns extends DNSModule
         }
 
         return 0;
+    }
+
+    public function testConnection()
+    {
+        return $this->api()->testConnection();
+    }
+
+    public function getAppConfigSummary()
+    {
+        return [
+            'nameservers' => $this->getDefaultNameservers(),
+            'supported_records' => $this->getSupportedRecords(),
+            'zone_limit' => $this->getDomainLimit(),
+        ];
     }
 
     protected function api()

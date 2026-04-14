@@ -407,6 +407,69 @@ class webnic_domains extends DomainModule implements DomainLookupInterface, Doma
         return $response['data'];
     }
 
+    public function testConnection()
+    {
+        if (!$this->getRegistrantUserId()) {
+            return false;
+        }
+
+        return $this->api()->testConnection();
+    }
+
+    public function getDomainInfo()
+    {
+        return $this->domainInfo();
+    }
+
+    public function getDomainContacts()
+    {
+        return $this->getContactInfo();
+    }
+
+    public function syncContacts()
+    {
+        return $this->updateContactInfo();
+    }
+
+    public function getTransferStatus()
+    {
+        $extended = isset($this->details['extended']) && is_array($this->details['extended']) ? $this->details['extended'] : [];
+        $transfer = !empty($extended['webnic_transfer']) ? $extended['webnic_transfer'] : [];
+
+        if (!empty($transfer['id'])) {
+            $response = $this->api()->get('domain/v2/transfer-in/status/' . rawurlencode($transfer['id']));
+            if ($this->success($response) && !empty($response['data'])) {
+                return $response['data'];
+            }
+        }
+
+        $response = $this->api()->get('domain/v2/transfer-in/status');
+        if (!$this->success($response) || empty($response['data']) || !is_array($response['data'])) {
+            return $transfer;
+        }
+
+        foreach ($response['data'] as $item) {
+            if (!empty($item['domainName']) && strcasecmp($item['domainName'], $this->name) === 0) {
+                return $item;
+            }
+        }
+
+        return $transfer;
+    }
+
+    public function getAdminSnapshot()
+    {
+        $info = $this->getDomainInfo();
+
+        return [
+            'domain' => $this->name,
+            'info' => $info,
+            'contacts' => $this->getDomainContacts(),
+            'transfer' => $this->getTransferStatus(),
+            'status' => $this->synchInfo(),
+        ];
+    }
+
     public function getContactInfo()
     {
         $contactIds = $this->getStoredContactIds();

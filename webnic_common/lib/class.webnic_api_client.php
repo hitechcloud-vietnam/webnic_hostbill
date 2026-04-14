@@ -73,6 +73,11 @@ class WebnicApiClient
         return is_array($response) && isset($response['code']) && (string) $response['code'] === '1000';
     }
 
+    public function testConnection()
+    {
+        return $this->authenticate();
+    }
+
     public function extractError($response)
     {
         if (!is_array($response)) {

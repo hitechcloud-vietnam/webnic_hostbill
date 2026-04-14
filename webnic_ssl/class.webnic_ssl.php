@@ -206,6 +206,11 @@ class webnic_ssl extends SSLModule
         return true;
     }
 
+    public function testConnection()
+    {
+        return $this->api()->testConnection();
+    }
+
     public function CertOptions($product)
     {
         $productKey = $this->extractProductValue($product, 'product_key', $this->options['product_key']['value']);
@@ -254,6 +259,114 @@ class webnic_ssl extends SSLModule
     {
         $info = $this->getSynchInfo();
         return $info ? $this->CertDetails() : [];
+    }
+
+    public function changeDCV($dcv, $email = '')
+    {
+        $orderId = $this->details[\SSL\ORDERID]['value'];
+        $method = strtolower((string) $dcv);
+        if ($method === 'http') {
+            $method = 'file';
+        }
+
+        $payload = ['authType' => $method];
+        if ($method === 'email' && $email !== '') {
+            $payload['approverEmail'] = $email;
+        }
+
+        $response = $this->api()->post('ssl/v2/orders/' . rawurlencode($orderId) . '/auth', $payload);
+        if (!$this->success($response)) {
+            return $this->failResponse($response);
+        }
+
+        $this->details[\SSL\DCV]['value'] = $method === 'file' ? 'http' : $method;
+        $this->storeDcvDetails($response['data']);
+
+        return true;
+    }
+
+    public function ResendDCVEmail()
+    {
+        $current = $this->details[\SSL\DCV_DETAILS]['value'] ?? [];
+        $email = '';
+        foreach ((array) $current as $entry) {
+            if (is_array($entry) && !empty($entry['value'])) {
+                $email = $entry['value'];
+                break;
+            }
+        }
+
+        return $this->changeDCV('email', $email);
+    }
+
+    public function CertDcvDns()
+    {
+        $records = [];
+        foreach ((array) ($this->details[\SSL\DCV_DETAILS]['value'] ?? []) as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            if (($entry['type'] ?? '') === 'dns' || !empty($entry['dnsName']) || !empty($entry['dnsValue'])) {
+                $records[] = [
+                    'name' => $entry['dnsName'] ?? ($entry['name'] ?? ''),
+                    'type' => $entry['dnsType'] ?? 'TXT',
+                    'content' => $entry['dnsValue'] ?? ($entry['value'] ?? ''),
+                ];
+            }
+        }
+
+        return $records;
+    }
+
+    public function CertDcvHttp()
+    {
+        $files = [];
+        foreach ((array) ($this->details[\SSL\DCV_DETAILS]['value'] ?? []) as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            if (($entry['type'] ?? '') === 'file' || !empty($entry['fileName']) || !empty($entry['fileContent']) || !empty($entry['url'])) {
+                $files[] = [
+                    'url' => $entry['url'] ?? ($entry['fileName'] ?? ''),
+                    'data' => $entry['fileContent'] ?? ($entry['value'] ?? ''),
+                ];
+            }
+        }
+
+        return $files;
+    }
+
+    public function getApproverEmailChoices()
+    {
+        $emails = [];
+        foreach ($this->CertDCVEmail() as $domain => $items) {
+            foreach ((array) $items as $item) {
+                $emails[] = $item;
+            }
+        }
+
+        return array_values(array_unique(array_filter($emails)));
+    }
+
+    public function getUiCertificateDetails()
+    {
+        $this->getSynchInfo();
+
+        return [
+            'cn' => $this->details[\SSL\CN]['value'] ?? '',
+            'order_id' => $this->details[\SSL\ORDERID]['value'] ?? '',
+            'status' => $this->details[\SSL\STATUS]['value'] ?? '',
+            'csr' => $this->details[\SSL\CSR]['value'] ?? '',
+            'san' => $this->getSanList(),
+            'dcv' => $this->details[\SSL\DCV]['value'] ?? '',
+            'dcv_details' => $this->details[\SSL\DCV_DETAILS]['value'] ?? [],
+            'dcv_status' => $this->details['vendor_cert_status']['value'] ?? '',
+        ];
+    }
+
+    public function getProductCatalogOptions()
+    {
+        return $this->getProductCatalog();
     }
 
     public function getSynchInfo()
@@ -481,6 +594,9 @@ class webnic_ssl extends SSLModule
             foreach ($data['san'] as $san) {
                 $dcv[] = $san;
             }
+        }
+        if (!empty($data['authType'])) {
+            $this->details[\SSL\DCV]['value'] = $data['authType'] === 'file' ? 'http' : $data['authType'];
         }
         $this->details[\SSL\DCV_DETAILS]['value'] = $dcv;
     }
