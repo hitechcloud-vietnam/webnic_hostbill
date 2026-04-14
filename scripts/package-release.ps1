@@ -14,12 +14,14 @@ if (Test-Path $ReleaseRoot) {
 $domainTarget = Join-Path $ReleaseRoot 'includes\modules\Domain\webnic_domains'
 $hostingSslTarget = Join-Path $ReleaseRoot 'includes\modules\Hosting\webnic_ssl'
 $hostingDnsTarget = Join-Path $ReleaseRoot 'includes\modules\Hosting\webnic_dns'
+$typesTarget = Join-Path $ReleaseRoot 'includes\types'
 $docsTarget = Join-Path $ReleaseRoot 'docs'
 
 $targets = @(
     $domainTarget,
     $hostingSslTarget,
     $hostingDnsTarget,
+    $typesTarget,
     $docsTarget
 )
 
@@ -30,6 +32,9 @@ foreach ($target in $targets) {
 Copy-Item -Path (Join-Path $repoRoot 'webnic_domains\*') -Destination $domainTarget -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'webnic_ssl\*') -Destination $hostingSslTarget -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'webnic_dns\*') -Destination $hostingDnsTarget -Recurse -Force
+if (Test-Path (Join-Path $repoRoot 'webnic_types')) {
+    Copy-Item -Path (Join-Path $repoRoot 'webnic_types\*') -Destination $typesTarget -Recurse -Force
+}
 
 $docFiles = @(
     'README.md',
@@ -54,6 +59,7 @@ Included runtime paths:
 - `includes/modules/Domain/webnic_domains`
 - `includes/modules/Hosting/webnic_ssl`
 - `includes/modules/Hosting/webnic_dns`
+- `includes/types/class.webnicsslcert.php` (optional)
 
 Documentation is bundled in `docs/`.
 '@

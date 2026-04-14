@@ -8,6 +8,10 @@ This repository contains three custom modules built outside `core_dev/` and `pos
 - `webnic_ssl` - SSL provisioning module
 - `webnic_dns` - DNS management module
 
+Optional HostBill type assets for SSL are provided in:
+
+- `webnic_types/class.webnicsslcert.php`
+
 ## Goals
 
 - Keep implementation isolated from vendor/reference sources
@@ -32,6 +36,9 @@ webnic_dns/
   templates/
   user/
   class.webnic_dns.php
+webnic_types/
+  class.webnicsslcert.php
+  webnicsslcert/
 core_dev/
 postman_webnic/
 ```
@@ -99,8 +106,11 @@ HostBill SSL module for:
 - renewal
 - reissue
 - cancellation
+- CSR validation compatible with HostBill SSL type flows
+- dynamic CSR server/software list support
 - DCV email lookup
 - DCV method update
+- DCV email resend / method change compatibility
 - certificate synchronization
 - certificate download
 
@@ -125,10 +135,13 @@ HostBill DNS module for:
 - zone creation
 - zone deletion
 - zone listing
+- import zone listing
+- reverse `.arpa` zone filtering
 - zone record listing
 - add/edit/delete record
 - nameserver summary
 - supported record summary
+- billing and zone-management visibility flags
 
 UI includes:
 
@@ -150,6 +163,8 @@ Expected HostBill runtime mapping:
 - `webnic_domains` -> `includes/modules/Domain/webnic_domains`
 - `webnic_ssl` -> `includes/modules/Hosting/webnic_ssl`
 - `webnic_dns` -> `includes/modules/Hosting/webnic_dns`
+- optional `webnic_types/class.webnicsslcert.php` -> `includes/types/class.webnicsslcert.php`
+- optional `webnic_types/webnicsslcert/` -> `includes/types/webnicsslcert/`
 
 > Important: this repository is a development workspace. Final runtime placement must match your HostBill module loader expectations.
 

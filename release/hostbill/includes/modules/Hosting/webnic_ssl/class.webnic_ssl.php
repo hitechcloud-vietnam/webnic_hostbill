@@ -6,6 +6,8 @@ class WebnicSslApiClient
     const TEST_BASE = 'https://oteapi.webnic.cc/';
     const TOKEN_PATH = 'reseller/v2/api-user/token';
 
+    protected static $tokenCache = [];
+
     protected $username;
     protected $password;
     protected $testMode = false;
@@ -215,6 +217,18 @@ class WebnicSslApiClient
 
     protected function authenticate()
     {
+        $cacheKey = sha1(implode('|', [$this->getBaseUrl(), $this->username, $this->password]));
+
+        if (isset(self::$tokenCache[$cacheKey])) {
+            $cached = self::$tokenCache[$cacheKey];
+            if (!empty($cached['accessToken']) && !empty($cached['expiresAt']) && (int) $cached['expiresAt'] > time() + 30) {
+                $this->accessToken = $cached['accessToken'];
+                $this->tokenExpiresAt = (int) $cached['expiresAt'];
+
+                return true;
+            }
+        }
+
         if ($this->accessToken && $this->tokenExpiresAt > time() + 30) {
             return true;
         }
@@ -261,6 +275,10 @@ class WebnicSslApiClient
         $this->accessToken = (string) $decoded['data']['access_token'];
         $expiresIn = (int) ($decoded['data']['expires_in'] ?? 3600);
         $this->tokenExpiresAt = time() + $expiresIn;
+        self::$tokenCache[$cacheKey] = [
+            'accessToken' => $this->accessToken,
+            'expiresAt' => $this->tokenExpiresAt,
+        ];
         $this->lastError = '';
         $this->lastResponse = $decoded;
 
@@ -362,6 +380,7 @@ class webnic_ssl extends SSLModule
     protected $commands = ['Reissue', 'Terminate'];
     protected $connect_data = [];
     protected $client;
+    protected $productCatalogCache;
 
     public function connect($server)
     {
@@ -509,7 +528,88 @@ class webnic_ssl extends SSLModule
 
     public function CertContacts($params)
     {
-        return SSLType::contacts_init('OV', $params);
+        return SSLType::contacts_init($this->getValidationLevel(), $params);
+    }
+
+    public function CertValidateCSR($csrString, &$csrData)
+    {
+        if (!is_array($csrData) || empty($csrData['CN'])) {
+            $this->addError('CSR common name is missing or invalid.');
+            return false;
+        }
+
+        $catalog = $this->findProductCatalogItem($this->resolveProductKey());
+        $commonName = trim((string) $csrData['CN']);
+        $isWildcard = strpos($commonName, '*.') === 0;
+        $supportsWildcard = !empty($catalog['wildcard']);
+
+        if ($isWildcard && !$supportsWildcard) {
+            $this->addError('Selected WebNIC SSL product does not support wildcard CSR.');
+            return false;
+        }
+
+        $sans = [];
+        if (!empty($csrData['SANS'])) {
+            $sans = is_array($csrData['SANS']) ? $csrData['SANS'] : [$csrData['SANS']];
+        }
+
+        $sanLimit = $this->getSanLimit($catalog);
+        if ($sanLimit >= 0 && count(array_filter($sans)) > $sanLimit) {
+            $this->addError('CSR SAN count exceeds the limit configured for the selected WebNIC SSL product.');
+            return false;
+        }
+
+        return true;
+    }
+
+    public function getCSRServers($product)
+    {
+        $catalog = [];
+        $productKey = $this->extractProductValue($product, 'product_key', $this->resolveProductKey());
+        if ($productKey) {
+            $catalog = $this->findProductCatalogItem($productKey);
+        }
+
+        $servers = $this->defaultCsrServers();
+        if (!empty($catalog['serverTypes']) && is_array($catalog['serverTypes'])) {
+            $normalized = [];
+            foreach ($catalog['serverTypes'] as $key => $label) {
+                if (is_array($label)) {
+                    $value = $label['value'] ?? $label['id'] ?? $key;
+                    $name = $label['label'] ?? $label['name'] ?? $value;
+                    $normalized[(string) $value] = $name;
+                } elseif (is_string($key)) {
+                    $normalized[$key] = $label;
+                } else {
+                    $normalized[(string) $label] = $label;
+                }
+            }
+            if (!empty($normalized)) {
+                return $normalized;
+            }
+        }
+
+        return $servers;
+    }
+
+    public function CertDownload()
+    {
+        $certificate = $this->downloadCertificate('PEM', '', '', true);
+        if ($certificate === false) {
+            return false;
+        }
+
+        return $this->normalizeDownloadedCertificateChain($certificate);
+    }
+
+    public function CertDCVEmailResend()
+    {
+        return $this->ResendDCVEmail();
+    }
+
+    public function CertDCVMethodChange($method, $email = false)
+    {
+        return $this->changeDCV($method, $email ?: '');
     }
 
     public function CertDCVEmail()
@@ -856,6 +956,8 @@ class webnic_ssl extends SSLModule
                     $emails[] = $entry['value'];
                 } elseif (!empty($entry['email'])) {
                     $emails[] = $entry['email'];
+                } elseif (!empty($entry['approverEmail'])) {
+                    $emails[] = $entry['approverEmail'];
                 }
             }
         }
@@ -865,19 +967,91 @@ class webnic_ssl extends SSLModule
 
     protected function storeDcvDetails(array $data)
     {
-        $dcv = [];
-        if (!empty($data['commonName'])) {
-            $dcv[] = $data['commonName'];
-        }
-        if (!empty($data['san']) && is_array($data['san'])) {
-            foreach ($data['san'] as $san) {
-                $dcv[] = $san;
-            }
-        }
         if (!empty($data['authType'])) {
             $this->details[\SSL\DCV]['value'] = $data['authType'] === 'file' ? 'http' : $data['authType'];
         }
-        $this->details[\SSL\DCV_DETAILS]['value'] = $dcv;
+
+        $entries = [];
+        $domains = [];
+
+        if (!empty($data['commonName'])) {
+            $domains[] = $data['commonName'];
+        }
+        if (!empty($data['san']) && is_array($data['san'])) {
+            foreach ($data['san'] as $san) {
+                if (!empty($san)) {
+                    $domains[] = $san;
+                }
+            }
+        }
+
+        $domains = array_values(array_unique(array_filter($domains)));
+        $authType = strtolower((string) ($data['authType'] ?? ''));
+
+        foreach ($domains as $domain) {
+            $entry = [
+                'commonName' => $domain,
+                'domain' => $domain,
+                'type' => $authType,
+            ];
+
+            if (!empty($data['approverEmail'])) {
+                $entry['value'] = $data['approverEmail'];
+                $entry['email'] = $data['approverEmail'];
+                $entry['approverEmail'] = $data['approverEmail'];
+            }
+            if (!empty($data['dnsName']) || !empty($data['dnsValue'])) {
+                $entry['dnsName'] = $data['dnsName'] ?? '';
+                $entry['dnsValue'] = $data['dnsValue'] ?? '';
+                $entry['dnsType'] = $data['dnsType'] ?? 'TXT';
+            }
+            if (!empty($data['fileName']) || !empty($data['fileContent']) || !empty($data['url'])) {
+                $entry['fileName'] = $data['fileName'] ?? '';
+                $entry['fileContent'] = $data['fileContent'] ?? '';
+                $entry['url'] = $data['url'] ?? ($data['fileName'] ?? '');
+            }
+
+            $entries[] = $entry;
+        }
+
+        foreach (['approverEmails', 'approvalEmails', 'auths', 'domains'] as $listKey) {
+            if (empty($data[$listKey]) || !is_array($data[$listKey])) {
+                continue;
+            }
+
+            foreach ($data[$listKey] as $item) {
+                if (is_string($item)) {
+                    $entries[] = [
+                        'type' => 'email',
+                        'value' => $item,
+                        'email' => $item,
+                    ];
+                    continue;
+                }
+
+                if (!is_array($item)) {
+                    continue;
+                }
+
+                $entry = $item;
+                if (!empty($entry['authType']) && empty($entry['type'])) {
+                    $entry['type'] = $entry['authType'];
+                }
+                if (($entry['type'] ?? '') === 'file') {
+                    $entry['type'] = 'http';
+                }
+                if (!empty($entry['approverEmail']) && empty($entry['value'])) {
+                    $entry['value'] = $entry['approverEmail'];
+                }
+                if (!empty($entry['email']) && empty($entry['value'])) {
+                    $entry['value'] = $entry['email'];
+                }
+
+                $entries[] = $entry;
+            }
+        }
+
+        $this->details[\SSL\DCV_DETAILS]['value'] = array_values($entries);
     }
 
     protected function getSanList()
@@ -911,11 +1085,20 @@ class webnic_ssl extends SSLModule
 
     protected function getProductCatalog()
     {
+        if (is_array($this->productCatalogCache)) {
+            return $this->productCatalogCache;
+        }
+
         $response = $this->api()->get('ssl/v2/products/list');
         if (!$this->success($response)) {
+            $this->productCatalogCache = [];
             return [];
         }
-        return !empty($response['data']) ? $response['data'] : [];
+
+        $catalog = !empty($response['data']) ? $response['data'] : [];
+        $this->productCatalogCache = is_array($catalog) ? $catalog : [];
+
+        return $this->productCatalogCache;
     }
 
     protected function findProductCatalogItem($productKey)
@@ -940,5 +1123,96 @@ class webnic_ssl extends SSLModule
         }
 
         return $default;
+    }
+
+    protected function getValidationLevel()
+    {
+        $productKey = '';
+        if (!empty($this->details['productKey']['value'])) {
+            $productKey = $this->details['productKey']['value'];
+        } elseif (!empty($this->options['product_key']['value'])) {
+            $productKey = $this->options['product_key']['value'];
+        } elseif (!empty($this->product_details['options']['product_key'])) {
+            $productKey = $this->product_details['options']['product_key'];
+        }
+
+        $catalog = $productKey !== '' ? $this->findProductCatalogItem($productKey) : [];
+        $level = strtoupper((string) ($catalog['validationType'] ?? $catalog['validationLevel'] ?? ''));
+        if (in_array($level, ['DV', 'OV', 'EV'], true)) {
+            return $level;
+        }
+
+        return 'OV';
+    }
+
+    protected function getSanLimit(array $catalog)
+    {
+        if (empty($catalog)) {
+            return -1;
+        }
+
+        if (empty($catalog['allowSan']) && empty($catalog['allowWsan'])) {
+            return 0;
+        }
+
+        $limit = 0;
+        if (!empty($catalog['bundle']['san'])) {
+            $limit = max($limit, (int) $catalog['bundle']['san']);
+        }
+        if (!empty($catalog['bundle']['wSan'])) {
+            $limit = max($limit, (int) $catalog['bundle']['wSan']);
+        }
+        if (!empty($catalog['maxSan'])) {
+            $limit = max($limit, (int) $catalog['maxSan']);
+        }
+
+        if ($limit === 0 && (!empty($catalog['allowSan']) || !empty($catalog['allowWsan']))) {
+            return -1;
+        }
+
+        return $limit;
+    }
+
+    protected function defaultCsrServers()
+    {
+        return [
+            '1' => 'Apache + MOD SSL',
+            '2' => 'Apache + Raven',
+            '3' => 'Apache + SSLeay',
+            '4' => 'C2Net Stronghold',
+            '24' => 'cPanel',
+            '25' => 'Ensim',
+            '26' => 'H-Sphere',
+            '27' => 'Ipswitch',
+            '28' => 'Plesk',
+            '7' => 'IBM HTTP Server',
+            '12' => 'Microsoft IIS 4.0',
+            '13' => 'Microsoft IIS 5.0',
+            '33' => 'Microsoft IIS 6.0+',
+            '20' => 'Apache + OpenSSL',
+            '21' => 'Apache 2',
+            '29' => 'Tomcat',
+            '30' => 'WebLogic',
+            '18' => 'Other',
+        ];
+    }
+
+    protected function normalizeDownloadedCertificateChain($certificate)
+    {
+        if (is_array($certificate)) {
+            return array_values(array_filter($certificate));
+        }
+
+        $certificate = trim((string) $certificate);
+        if ($certificate === '') {
+            return [];
+        }
+
+        preg_match_all('/-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----/s', $certificate, $matches);
+        if (!empty($matches[0])) {
+            return array_values(array_filter(array_map('trim', $matches[0])));
+        }
+
+        return [$certificate];
     }
 }

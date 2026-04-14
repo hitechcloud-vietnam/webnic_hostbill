@@ -7,5 +7,6 @@ Included runtime paths:
 - `includes/modules/Domain/webnic_domains`
 - `includes/modules/Hosting/webnic_ssl`
 - `includes/modules/Hosting/webnic_dns`
+- `includes/types/class.webnicsslcert.php` (optional)
 
 Documentation is bundled in `docs/`.

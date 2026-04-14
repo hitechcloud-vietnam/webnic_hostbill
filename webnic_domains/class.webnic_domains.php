@@ -6,6 +6,8 @@ class WebnicDomainsApiClient
     const TEST_BASE = 'https://oteapi.webnic.cc/';
     const TOKEN_PATH = 'reseller/v2/api-user/token';
 
+    protected static $tokenCache = [];
+
     protected $username;
     protected $password;
     protected $testMode = false;
@@ -215,6 +217,18 @@ class WebnicDomainsApiClient
 
     protected function authenticate()
     {
+        $cacheKey = sha1(implode('|', [$this->getBaseUrl(), $this->username, $this->password]));
+
+        if (isset(self::$tokenCache[$cacheKey])) {
+            $cached = self::$tokenCache[$cacheKey];
+            if (!empty($cached['accessToken']) && !empty($cached['expiresAt']) && (int) $cached['expiresAt'] > time() + 30) {
+                $this->accessToken = $cached['accessToken'];
+                $this->tokenExpiresAt = (int) $cached['expiresAt'];
+
+                return true;
+            }
+        }
+
         if ($this->accessToken && $this->tokenExpiresAt > time() + 30) {
             return true;
         }
@@ -261,6 +275,10 @@ class WebnicDomainsApiClient
         $this->accessToken = (string) $decoded['data']['access_token'];
         $expiresIn = (int) ($decoded['data']['expires_in'] ?? 3600);
         $this->tokenExpiresAt = time() + $expiresIn;
+        self::$tokenCache[$cacheKey] = [
+            'accessToken' => $this->accessToken,
+            'expiresAt' => $this->tokenExpiresAt,
+        ];
         $this->lastError = '';
         $this->lastResponse = $decoded;
 
@@ -565,7 +583,7 @@ class webnic_domains extends DomainModule implements DomainLookupInterface, Doma
 
     public function updateIDProtection()
     {
-        $active = !$this->getIDProtection();
+        $active = isset($this->details['idprotection']) ? (bool) $this->details['idprotection'] : !$this->getIDProtection();
         $response = $this->api()->put('domain/v2/whois-privacy/toggle', [
             'domainName' => $this->name,
             'active' => (bool) $active,
@@ -592,7 +610,19 @@ class webnic_domains extends DomainModule implements DomainLookupInterface, Doma
             return false;
         }
 
-        return isset($info['status']) && $info['status'] === 'transfer_protected';
+        $statuses = [];
+        if (isset($info['status'])) {
+            $statuses = is_array($info['status']) ? $info['status'] : [$info['status']];
+        }
+
+        foreach ($statuses as $status) {
+            $status = strtolower((string) $status);
+            if (in_array($status, ['transfer_protected', 'clienttransferprohibited', 'servertransferprohibited', 'locked'], true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function updateRegistrarLock()
@@ -680,11 +710,17 @@ class webnic_domains extends DomainModule implements DomainLookupInterface, Doma
 
     public function testConnection()
     {
-        if (!$this->getRegistrantUserId()) {
+        $connected = $this->api()->testConnection();
+        if (!$connected) {
             return false;
         }
 
-        return $this->api()->testConnection();
+        $userId = trim((string) $this->configuration['Registrant User ID']['value']);
+        if ($userId === '') {
+            $this->addInfo('WebNIC API authentication succeeded, but Registrant User ID is not configured yet.');
+        }
+
+        return true;
     }
 
     public function getDomainInfo()

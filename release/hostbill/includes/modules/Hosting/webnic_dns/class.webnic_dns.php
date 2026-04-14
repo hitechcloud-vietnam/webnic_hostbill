@@ -6,6 +6,8 @@ class WebnicDnsApiClient
     const TEST_BASE = 'https://oteapi.webnic.cc/';
     const TOKEN_PATH = 'reseller/v2/api-user/token';
 
+    protected static $tokenCache = [];
+
     protected $username;
     protected $password;
     protected $testMode = false;
@@ -215,6 +217,18 @@ class WebnicDnsApiClient
 
     protected function authenticate()
     {
+        $cacheKey = sha1(implode('|', [$this->getBaseUrl(), $this->username, $this->password]));
+
+        if (isset(self::$tokenCache[$cacheKey])) {
+            $cached = self::$tokenCache[$cacheKey];
+            if (!empty($cached['accessToken']) && !empty($cached['expiresAt']) && (int) $cached['expiresAt'] > time() + 30) {
+                $this->accessToken = $cached['accessToken'];
+                $this->tokenExpiresAt = (int) $cached['expiresAt'];
+
+                return true;
+            }
+        }
+
         if ($this->accessToken && $this->tokenExpiresAt > time() + 30) {
             return true;
         }
@@ -261,6 +275,10 @@ class WebnicDnsApiClient
         $this->accessToken = (string) $decoded['data']['access_token'];
         $expiresIn = (int) ($decoded['data']['expires_in'] ?? 3600);
         $this->tokenExpiresAt = time() + $expiresIn;
+        self::$tokenCache[$cacheKey] = [
+            'accessToken' => $this->accessToken,
+            'expiresAt' => $this->tokenExpiresAt,
+        ];
         $this->lastError = '';
         $this->lastResponse = $decoded;
 
@@ -330,6 +348,16 @@ class webnic_dns extends DNSModule
         return true;
     }
 
+    public function Create()
+    {
+        return true;
+    }
+
+    public function Terminate()
+    {
+        return true;
+    }
+
     public function deleteZone($domain)
     {
         $response = $this->api()->delete('dns/v2/zone/' . rawurlencode($domain));
@@ -356,6 +384,30 @@ class webnic_dns extends DNSModule
                 'type' => $zone['zoneType'] ?? '',
                 'subscription' => $zone['subscription'] ?? false,
             ];
+        }
+
+        return $zones;
+    }
+
+    public function importZones()
+    {
+        $zones = [];
+        foreach ($this->listZones() as $zone) {
+            if (!empty($zone['domain'])) {
+                $zones[$zone['id']] = $zone['domain'];
+            }
+        }
+
+        return $zones;
+    }
+
+    public function getArpaZones()
+    {
+        $zones = [];
+        foreach ($this->importZones() as $id => $domain) {
+            if (stripos($domain, '.arpa') !== false) {
+                $zones[$id] = $domain;
+            }
         }
 
         return $zones;
@@ -472,7 +524,19 @@ class webnic_dns extends DNSModule
             'nameservers' => $this->getDefaultNameservers(),
             'supported_records' => $this->getSupportedRecords(),
             'zone_limit' => $this->getDomainLimit(),
+            'show_billing' => $this->showBillingInfo(),
+            'show_zone_management' => $this->showZoneManagement(),
         ];
+    }
+
+    public function showBillingInfo()
+    {
+        return empty($this->resource('hide_billing'));
+    }
+
+    public function showZoneManagement()
+    {
+        return empty($this->resource('hide_zone_management'));
     }
 
     protected function api()
@@ -519,21 +583,21 @@ class webnic_dns extends DNSModule
     protected function normalizeRdatas(array $data)
     {
         if (!empty($data['rdatas']) && is_array($data['rdatas'])) {
-            return $data['rdatas'];
+            return $this->normalizeRdataItems($data['rdatas'], strtoupper($data['type'] ?? ''));
         }
         if (!empty($data['value']) && is_array($data['value'])) {
             $items = [];
             foreach ($data['value'] as $value) {
                 $items[] = ['value' => $value];
             }
-            return $items;
+            return $this->normalizeRdataItems($items, strtoupper($data['type'] ?? ''));
         }
         if (!empty($data['content']) && is_array($data['content'])) {
             $items = [];
             foreach ($data['content'] as $value) {
                 $items[] = ['value' => $value];
             }
-            return $items;
+            return $this->normalizeRdataItems($items, strtoupper($data['type'] ?? ''));
         }
 
         $value = '';
@@ -543,21 +607,96 @@ class webnic_dns extends DNSModule
             $value = $data['content'];
         }
 
-        return [['value' => $value]];
+        return $this->normalizeRdataItems([['value' => $value]], strtoupper($data['type'] ?? ''));
     }
 
     protected function normalizeRecord(array $record)
     {
         $name = array_key_exists('name', $record) ? $record['name'] : '';
+        $type = strtoupper((string) ($record['type'] ?? ''));
+        $rdatas = $this->normalizeRdataItems($record['rdatas'] ?? [], $type);
+
+        $value = '';
+        if (!empty($rdatas[0])) {
+            $value = $this->flattenRdataValue($rdatas[0], $type);
+        }
+
         return [
-            'id' => md5(($record['type'] ?? '') . '|' . $name),
+            'id' => $this->buildRecordId($record, $rdatas),
             'zone' => $record['zone'] ?? null,
             'name' => $name,
-            'type' => $record['type'] ?? '',
+            'type' => $type,
             'ttl' => $record['ttl'] ?? 3600,
-            'rdatas' => $record['rdatas'] ?? [],
-            'value' => !empty($record['rdatas'][0]['value']) ? $record['rdatas'][0]['value'] : '',
+            'rdatas' => $rdatas,
+            'value' => $value,
+            'priority' => !empty($rdatas[0]['priority']) ? $rdatas[0]['priority'] : 0,
             'remarks' => $record['remarks'] ?? '',
         ];
+    }
+
+    protected function normalizeRdataItems(array $items, $type)
+    {
+        $normalized = [];
+        foreach ($items as $item) {
+            if (is_scalar($item)) {
+                $item = ['value' => (string) $item];
+            }
+            if (!is_array($item)) {
+                continue;
+            }
+
+            switch ($type) {
+                case 'MX':
+                    $normalized[] = [
+                        'value' => (string) ($item['value'] ?? $item['exchange'] ?? ''),
+                        'priority' => isset($item['priority']) ? (int) $item['priority'] : (isset($item['preference']) ? (int) $item['preference'] : 0),
+                    ];
+                    break;
+                case 'SRV':
+                    $normalized[] = [
+                        'value' => (string) ($item['value'] ?? $item['target'] ?? ''),
+                        'priority' => isset($item['priority']) ? (int) $item['priority'] : 0,
+                        'weight' => isset($item['weight']) ? (int) $item['weight'] : 0,
+                        'port' => isset($item['port']) ? (int) $item['port'] : 0,
+                    ];
+                    break;
+                case 'TXT':
+                case 'SPF':
+                case 'CAA':
+                    $normalized[] = ['value' => (string) ($item['value'] ?? '')];
+                    break;
+                default:
+                    $normalized[] = ['value' => (string) ($item['value'] ?? '')];
+                    break;
+            }
+        }
+
+        return $normalized;
+    }
+
+    protected function flattenRdataValue(array $rdata, $type)
+    {
+        switch ($type) {
+            case 'MX':
+                return trim(($rdata['priority'] ?? 0) . ' ' . ($rdata['value'] ?? ''));
+            case 'SRV':
+                return trim(($rdata['priority'] ?? 0) . ' ' . ($rdata['weight'] ?? 0) . ' ' . ($rdata['port'] ?? 0) . ' ' . ($rdata['value'] ?? ''));
+            default:
+                return (string) ($rdata['value'] ?? '');
+        }
+    }
+
+    protected function buildRecordId(array $record, array $rdatas)
+    {
+        if (!empty($record['id'])) {
+            return (string) $record['id'];
+        }
+
+        return md5(json_encode([
+            'zone' => $record['zone'] ?? null,
+            'name' => $record['name'] ?? '',
+            'type' => strtoupper((string) ($record['type'] ?? '')),
+            'rdatas' => $rdatas,
+        ]));
     }
 }

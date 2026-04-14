@@ -63,29 +63,37 @@ Generated package target:
 
 Important paths inside the package:
 
-- `release/hostbill/includes/modules/Domain/webnic_domains/`
-- `release/hostbill/includes/modules/Hosting/webnic_ssl/`
-- `release/hostbill/includes/modules/Hosting/webnic_dns/`
-- `release/hostbill/docs/`
+- `release/hostbill/includes/types/class.webnicsslcert.php`
 
 To regenerate the package, run:
 
 - `scripts/package-release.ps1`
 
-## Pre-Deployment Checklist
 
 ## HostBill
 
-- HostBill instance is working normally
 - Admin access is available
+### Optional SSL Type
+
+Repository source:
+
+- `webnic_types/class.webnicsslcert.php`
+
+Target runtime path:
+
+- `includes/types/class.webnicsslcert.php`
+
+Optional template/runtime directory source:
+
+- `webnic_types/webnicsslcert/`
+
+Target runtime path:
+
+- `includes/types/webnicsslcert/`
 - Module loader can discover custom modules
 - Staging environment is preferred before production
 
-## PHP
-
-- PHP cURL extension enabled
-- JSON extension enabled
-- TLS/HTTPS outbound access allowed
+- optional `includes/types/` assets for `webnicsslcert`
 - `tempnam()` and temporary file creation allowed for SSL bundle download flow
 
 ## Network
